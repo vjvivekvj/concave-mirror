@@ -95,8 +95,9 @@ input[type=range]{width:100%;accent-color:var(--brass)}
     </div></div>
     <div><div class="lbl">Zoom</div>
     <div class="chips" id="mags" role="group" aria-label="Magnification">
+      <button type="button" data-m="lean" aria-pressed="true">Lean</button>
       <button type="button" data-m="1">1×</button>
-      <button type="button" data-m="2" aria-pressed="true">2×</button>
+      <button type="button" data-m="2">2×</button>
       <button type="button" data-m="3">3×</button>
       <button type="button" data-m="5">5×</button>
       <button type="button" data-m="7">7×</button>
@@ -123,7 +124,7 @@ const $ = id => document.getElementById(id);
 const video = $('v'), canvas = $('gl'), err = $('err'), toast = $('toast');
 const MP = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
 
-const state = { M: 2, border: .04, shape: 'full', warmth: .4, gain: 1.15, frozen: false, trueMirror: false,
+const state = { M: 2, Mt: 2, lean: true, f0: 0, fNow: 0, calib: [], border: .04, shape: 'full', warmth: .4, gain: 1.15, frozen: false, trueMirror: false,
   facing: 'user', focus: 'face', panX: 0, panY: 0, tx: 0, ty: 0, stream: null, manualUntil: 0 };
 
 let toastTimer;
@@ -219,29 +220,48 @@ async function loadTracker(){
       baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite', delegate: 'GPU' },
       runningMode: 'VIDEO', minDetectionConfidence: .5
     });
-    say('Following your face · tap for controls');
+    say('Hold still for a second · then lean in to magnify');
   } catch(e){
     say('Face tracking isn’t available here · drag to aim', 4000);
     setFocus('off');
+    if(state.lean){ state.lean = false; state.Mt = 2; setMagUI('2'); }
   }
 }
 const FOCUS_Y = { jaw: .98, face: .55, eyes: .32, lips: .82 };
+/* Lean: like a real concave mirror, magnification rises as your face gets closer.
+   Your face size at your normal distance (first second) is the 2× baseline. */
+const LEAN_BASE = 2, LEAN_POWER = 1.3;
 function track(now){
-  if(!detector || state.focus === 'off' || state.frozen || now < state.manualUntil || now - lastDetect < 90) return;
+  if(!detector || state.frozen || now - lastDetect < 90) return;
+  const wantPan = state.focus !== 'off' && now >= state.manualUntil;
+  if(!wantPan && !state.lean) return;
   lastDetect = now;
   let res; try { res = detector.detectForVideo(video, now); } catch(e){ return; }
   const det = res && res.detections && res.detections[0];
   if(!det) return;
   const b = det.boundingBox;
-  const cx = b.originX + b.width / 2, cy = b.originY + b.height * FOCUS_Y[state.focus];
-  state.tx = cx - video.videoWidth / 2; state.ty = cy - video.videoHeight / 2;
+  if(wantPan){
+    const fy = FOCUS_Y[state.focus] || .55;
+    const cx = b.originX + b.width / 2, cy = b.originY + b.height * fy;
+    state.tx = cx - video.videoWidth / 2; state.ty = cy - video.videoHeight / 2;
+  }
+  const f = b.height / Math.max(1, video.videoHeight);
+  state.fNow = state.fNow ? state.fNow + (f - state.fNow) * .35 : f;
+  if(!state.f0){
+    state.calib.push(f);
+    if(state.calib.length >= 10){ const c = state.calib.slice().sort((a, z) => a - z); state.f0 = c[5]; say('Lean in to magnify · pull back to zoom out', 3500); }
+    return;
+  }
+  if(state.lean) state.Mt = Math.max(1, Math.min(7, LEAN_BASE * Math.pow(state.fNow / state.f0, LEAN_POWER)));
 }
+function recalibrate(){ state.f0 = 0; state.fNow = 0; state.calib = []; state.Mt = LEAN_BASE; }
 
 /* ---------- render ---------- */
 function frame(now){
   resize();
   if(!state.frozen && video.readyState >= 2) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
   track(now);
+  state.M += (state.Mt - state.M) * (state.lean ? .08 : .25);
   if(state.focus !== 'off' && now >= state.manualUntil){
     state.panX += (state.tx - state.panX) * .18; state.panY += (state.ty - state.panY) * .18;
   }
@@ -275,7 +295,7 @@ async function startCamera(){
 }
 /* a zoom is 'soft' when one camera pixel would cover more than ~4 screen pixels */
 function upscale(M){ resize(); return (2 * geom().rref * M) / Math.max(1, Math.min(video.videoWidth, video.videoHeight)); }
-function markSoft(){ document.querySelectorAll('#mags button').forEach(b => b.classList.toggle('soft', upscale(+b.dataset.m) > 4)); }
+function markSoft(){ document.querySelectorAll('#mags button').forEach(b => b.classList.toggle('soft', b.dataset.m !== 'lean' && upscale(+b.dataset.m) > 4)); }
 window.addEventListener('resize', () => { if(video.videoWidth) markSoft(); });
 async function keepAwake(){ try { await navigator.wakeLock?.request('screen'); } catch(e) {} }
 document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'visible' && state.stream) keepAwake(); });
@@ -305,7 +325,11 @@ function chips(groupId, attr, onPick){
 }
 const setFocusUI = chips('focus', 'f', v => { state.focus = v; state.manualUntil = 0; if(v === 'off') say('Drag to aim · double-tap to recentre'); });
 function setFocus(v){ state.focus = v; setFocusUI(v); }
-chips('mags', 'm', v => { state.M = +v; if(video.videoWidth && upscale(state.M) > 4) say('Your camera can’t resolve ' + v + '× here · move closer instead', 3500); });
+const setMagUI = chips('mags', 'm', v => {
+  if(v === 'lean'){ state.lean = true; recalibrate(); say(detector ? 'Hold still for a second, then lean in to magnify' : 'Lean needs face tracking, which is still loading'); return; }
+  state.lean = false; state.Mt = +v;
+  if(video.videoWidth && upscale(state.Mt) > 4) say('Your camera can’t resolve ' + v + '× here · move closer instead', 3500);
+});
 function bindRange(id, key, scale, fmt){
   const el = $(id), out = $(id + 'Out');
   const upd = () => { state[key] = el.value / scale; out.textContent = fmt(+el.value); };
