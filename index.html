@@ -240,22 +240,35 @@ function track(now){
   const det = res && res.detections && res.detections[0];
   if(!det) return;
   const b = det.boundingBox;
-  if(wantPan){
-    const fy = FOCUS_Y[state.focus] || .55;
-    const cx = b.originX + b.width / 2, cy = b.originY + b.height * fy;
-    state.tx = cx - video.videoWidth / 2; state.ty = cy - video.videoHeight / 2;
-  }
-  if(state.lean) state.Mt = Math.max(1, Math.min(AUTO_MAX, (2 * halfV()) / (b.height * FRAME[state.focus])));
+  /* Steady framing: use the median of recent readings (ignores a hand passing over the face),
+     and only re-frame when the head has clearly moved and stayed there for ~1 s. */
+  const fy = FOCUS_Y[state.focus] || .55;
+  hist.push({ x: b.originX + b.width / 2 - video.videoWidth / 2, y: b.originY + b.height * fy - video.videoHeight / 2,
+              m: Math.max(1, Math.min(AUTO_MAX, (2 * halfV()) / (b.height * FRAME[state.focus]))) });
+  if(hist.length > 11) hist.shift();
+  if(hist.length < 5) return;
+  const med = k => hist.map(h => h[k]).sort((a, z) => a - z)[hist.length >> 1];
+  const mx = med('x'), my = med('y'), mm = med('m');
+  const view = halfV() / state.M;                       // half the visible area, in camera pixels
+  const panOff = wantPan && Math.hypot(mx - state.tx, my - state.ty) > view * .25;
+  const zoomOff = state.lean && Math.abs(mm - state.Mt) / state.Mt > .22;
+  if(!state.framed){ if(wantPan){ state.tx = mx; state.ty = my; } if(state.lean) state.Mt = mm; state.framed = true; return; }
+  if(panOff || zoomOff){
+    if(!state.driftSince) state.driftSince = now;
+    if(now - state.driftSince > 1000){ if(wantPan){ state.tx = mx; state.ty = my; } if(state.lean) state.Mt = mm; state.driftSince = 0; }
+  } else state.driftSince = 0;
 }
+const hist = [];
+function reframe(){ hist.length = 0; state.framed = false; state.driftSince = 0; }
 
 /* ---------- render ---------- */
 function frame(now){
   resize();
   if(!state.frozen && video.readyState >= 2) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
   track(now);
-  state.M += (state.Mt - state.M) * (state.lean ? .08 : .25);
+  state.M += (state.Mt - state.M) * (state.lean ? .05 : .25);
   if(state.focus !== 'off' && now >= state.manualUntil){
-    state.panX += (state.tx - state.panX) * .18; state.panY += (state.ty - state.panY) * .18;
+    state.panX += (state.tx - state.panX) * .06; state.panY += (state.ty - state.panY) * .06;
   }
   [state.panX, state.panY] = clampPan(state.panX, state.panY);
   const c = geom(), L = lightRGB(state.warmth);
@@ -315,10 +328,10 @@ function chips(groupId, attr, onPick){
   btns.forEach(b => b.addEventListener('click', () => { btns.forEach(x => x.setAttribute('aria-pressed', x === b)); onPick(b.dataset[attr]); }));
   return v => btns.forEach(x => x.setAttribute('aria-pressed', x.dataset[attr] === v));
 }
-const setFocusUI = chips('focus', 'f', v => { state.focus = v; state.manualUntil = 0; if(v === 'off') say('Drag to aim · double-tap to recentre'); });
+const setFocusUI = chips('focus', 'f', v => { state.focus = v; state.manualUntil = 0; reframe(); if(v === 'off') say('Drag to aim · double-tap to recentre'); });
 function setFocus(v){ state.focus = v; setFocusUI(v); }
 const setMagUI = chips('mags', 'm', v => {
-  if(v === 'lean'){ state.lean = true; if(!detector) say('Auto needs face tracking, which is still loading'); return; }
+  if(v === 'lean'){ state.lean = true; reframe(); if(!detector) say('Auto needs face tracking, which is still loading'); return; }
   state.lean = false; state.Mt = +v;
   if(video.videoWidth && upscale(state.Mt) > 4) say('Your camera can’t resolve ' + v + '× here · move closer instead', 3500);
 });
@@ -353,7 +366,7 @@ $('grip').addEventListener('click', () => { clearTimeout(hideTimer); tray.classL
 let drag = null, lastTap = 0;
 canvas.addEventListener('pointerdown', e => {
   const now = performance.now();
-  if(now - lastTap < 300){ state.panX = state.panY = state.tx = state.ty = 0; state.manualUntil = 0; lastTap = 0; return; }
+  if(now - lastTap < 300){ state.manualUntil = 0; reframe(); lastTap = 0; say('Re-framing'); return; }
   lastTap = now;
   drag = { x: e.clientX, y: e.clientY, px: state.panX, py: state.panY };
   canvas.setPointerCapture(e.pointerId);
