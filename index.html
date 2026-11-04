@@ -45,6 +45,7 @@ h1{font:600 clamp(34px,8vw,52px)/1.05 var(--display);margin:0;text-wrap:balance}
 .grip{justify-self:center;width:44px;height:5px;border-radius:3px;background:#5a5146;border:0;padding:0;cursor:pointer}
 .chips{display:flex;gap:6px}
 .chips button{flex:1;border:1px solid #4a4238;background:transparent;border-radius:12px;padding:9px 0;font-weight:600;font-size:14px;font-variant-numeric:tabular-nums;cursor:pointer}
+.chips button.soft::after{content:" soft";font-weight:500;font-size:11px;opacity:.6}
 .chips button[aria-pressed="true"]{background:var(--brass);border-color:var(--brass);color:#1b150c}
 .lbl{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin:2px 0 -4px}
 .row{display:grid;grid-template-columns:52px 1fr 60px;align-items:center;gap:10px;font-size:13px;color:var(--muted)}
@@ -133,7 +134,16 @@ const gl = canvas.getContext('webgl', { antialias: true });
 const VS = 'attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}';
 const FS = [
 'precision highp float;',
-'uniform sampler2D uTex;uniform vec2 uRes,uVid,uC,uPan,uHalf;uniform float uM,uFlip,uDpr,uGain,uShape,uCorner;uniform vec3 uLight;',
+'uniform sampler2D uTex;uniform vec2 uRes,uVid,uC,uPan,uHalf;uniform float uM,uFlip,uDpr,uGain,uShape,uCorner,uSharp;uniform vec3 uLight;',
+'vec3 cr(vec2 uv){',
+'  vec2 tx=1.0/uVid;vec2 sp=uv*uVid;vec2 t1=floor(sp-0.5)+0.5;vec2 f=sp-t1;',
+'  vec2 w0=f*(-0.5+f*(1.0-0.5*f));vec2 w1=1.0+f*f*(-2.5+1.5*f);vec2 w2=f*(0.5+f*(2.0-1.5*f));vec2 w3=f*f*(-0.5+0.5*f);',
+'  vec2 w12=w1+w2;vec2 a=(t1-1.0)*tx;vec2 c=(t1+2.0)*tx;vec2 b=(t1+w2/w12)*tx;',
+'  vec3 r=texture2D(uTex,vec2(a.x,a.y)).rgb*w0.x*w0.y+texture2D(uTex,vec2(b.x,a.y)).rgb*w12.x*w0.y+texture2D(uTex,vec2(c.x,a.y)).rgb*w3.x*w0.y;',
+'  r+=texture2D(uTex,vec2(a.x,b.y)).rgb*w0.x*w12.y+texture2D(uTex,vec2(b.x,b.y)).rgb*w12.x*w12.y+texture2D(uTex,vec2(c.x,b.y)).rgb*w3.x*w12.y;',
+'  r+=texture2D(uTex,vec2(a.x,c.y)).rgb*w0.x*w3.y+texture2D(uTex,vec2(b.x,c.y)).rgb*w12.x*w3.y+texture2D(uTex,vec2(c.x,c.y)).rgb*w3.x*w3.y;',
+'  return r;',
+'}',
 'void main(){',
 '  vec2 p=vec2(gl_FragCoord.x,uRes.y-gl_FragCoord.y);',
 '  vec2 q=p-uC;float rref=min(uHalf.x,uHalf.y);',
@@ -148,7 +158,10 @@ const FS = [
 '  float hv=0.5*min(uVid.x,uVid.y);',
 '  vec2 off=d*hv/uM;off.x*=uFlip;',
 '  vec2 uv=(uVid*0.5+uPan+off)/uVid;',
-'  vec3 col=texture2D(uTex,clamp(uv,0.001,0.999)).rgb*uGain;',
+'  vec2 uc=clamp(uv,0.001,0.999);vec2 tx=1.5/uVid;',
+'  vec3 col=cr(uc);',
+'  vec3 bl=(texture2D(uTex,uc+vec2(tx.x,0.)).rgb+texture2D(uTex,uc-vec2(tx.x,0.)).rgb+texture2D(uTex,uc+vec2(0.,tx.y)).rgb+texture2D(uTex,uc-vec2(0.,tx.y)).rgb)*0.25;',
+'  col=max(col+uSharp*(col-bl),0.0)*uGain;',
 '  if(uv.x<0.0||uv.x>1.0||uv.y<0.0||uv.y>1.0) col*=0.25;',
 '  col*=1.0-0.10*smoothstep(-rref*0.18,0.0,dist);',
 '  float gEdge=smoothstep(-aa,aa,dist);',
@@ -166,7 +179,7 @@ function initGL(){
   gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
   const a = gl.getAttribLocation(prog, 'a'); gl.enableVertexAttribArray(a); gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0);
-  ['uRes','uVid','uC','uPan','uHalf','uM','uFlip','uDpr','uGain','uShape','uCorner','uLight'].forEach(n => U[n] = gl.getUniformLocation(prog, n));
+  ['uRes','uVid','uC','uPan','uHalf','uM','uFlip','uDpr','uGain','uShape','uCorner','uSharp','uLight'].forEach(n => U[n] = gl.getUniformLocation(prog, n));
   gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
   [[gl.TEXTURE_MIN_FILTER, gl.LINEAR],[gl.TEXTURE_MAG_FILTER, gl.LINEAR],[gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]
     .forEach(([k, v]) => gl.texParameteri(gl.TEXTURE_2D, k, v));
@@ -241,6 +254,7 @@ function frame(now){
   gl.uniform2f(U.uPan, state.panX, state.panY);
   gl.uniform1f(U.uM, state.M); gl.uniform1f(U.uFlip, mirrored ? -1 : 1);
   gl.uniform1f(U.uDpr, dpr); gl.uniform1f(U.uGain, state.gain);
+  gl.uniform1f(U.uSharp, Math.min(.7, .15 + (state.M - 1) * .1));
   gl.uniform3f(U.uLight, L[0], L[1], L[2]);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   requestAnimationFrame(frame);
@@ -250,9 +264,19 @@ function frame(now){
 async function startCamera(){
   if(state.stream) state.stream.getTracks().forEach(t => t.stop());
   state.stream = await navigator.mediaDevices.getUserMedia({ audio: false,
-    video: { facingMode: state.facing, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    video: { facingMode: state.facing, width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30 } } });
+  const t = state.stream.getVideoTracks()[0];
+  try { const cap = t.getCapabilities ? t.getCapabilities() : {};
+    if(cap.width && cap.height) await t.applyConstraints({ width: { ideal: cap.width.max }, height: { ideal: cap.height.max } }); } catch(e) {}
   video.srcObject = state.stream; await video.play();
+  await new Promise(r => video.videoWidth ? r() : video.addEventListener('loadedmetadata', r, { once: true }));
+  markSoft();
+  say('Camera ' + video.videoWidth + '×' + video.videoHeight + (Math.min(video.videoWidth, video.videoHeight) < 1080 ? ' · move closer for detail' : ''), 3500);
 }
+/* a zoom is 'soft' when one camera pixel would cover more than ~4 screen pixels */
+function upscale(M){ resize(); return (2 * geom().rref * M) / Math.max(1, Math.min(video.videoWidth, video.videoHeight)); }
+function markSoft(){ document.querySelectorAll('#mags button').forEach(b => b.classList.toggle('soft', upscale(+b.dataset.m) > 4)); }
+window.addEventListener('resize', () => { if(video.videoWidth) markSoft(); });
 async function keepAwake(){ try { await navigator.wakeLock?.request('screen'); } catch(e) {} }
 document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'visible' && state.stream) keepAwake(); });
 
@@ -269,6 +293,7 @@ $('go').addEventListener('click', async () => {
   }
   initGL();
   $('start').hidden = true; $('app').hidden = false;
+  markSoft();
   keepAwake(); requestAnimationFrame(frame); loadTracker(); showTray();
 });
 
@@ -280,7 +305,7 @@ function chips(groupId, attr, onPick){
 }
 const setFocusUI = chips('focus', 'f', v => { state.focus = v; state.manualUntil = 0; if(v === 'off') say('Drag to aim · double-tap to recentre'); });
 function setFocus(v){ state.focus = v; setFocusUI(v); }
-chips('mags', 'm', v => { state.M = +v; });
+chips('mags', 'm', v => { state.M = +v; if(video.videoWidth && upscale(state.M) > 4) say('Your camera can’t resolve ' + v + '× here · move closer instead', 3500); });
 function bindRange(id, key, scale, fmt){
   const el = $(id), out = $(id + 'Out');
   const upd = () => { state[key] = el.value / scale; out.textContent = fmt(+el.value); };
